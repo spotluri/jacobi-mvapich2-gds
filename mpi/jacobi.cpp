@@ -214,6 +214,8 @@ int main(int argc, char * argv[])
 
     int iter = 0;
     real l2_norm = 1.0;
+
+    //TODO: Comm_dup_with_stream
     
     MPI_CALL( MPI_Barrier(MPI_COMM_WORLD) );
     double start = MPI_Wtime();
@@ -237,11 +239,21 @@ int main(int argc, char * argv[])
         const int bottom = (rank+1)%size;
         
         //Apply periodic boundary conditions
+
+        //TODO:; remove this event synchronize
         CUDA_RT_CALL( cudaEventSynchronize( compute_done ) );
         PUSH_RANGE("MPI",5)
+
+        //TODO: Irecv_on_stream(top)
+        //TODO: Irecv_on_stream(bottom)
+        //TODO: Isend_on_stream(top)
+        //TODO: Isend_on_stream(bottom)
+
         MPI_CALL( MPI_Sendrecv( a_new+iy_start*nx,   nx, MPI_REAL_TYPE, top   , 0, a_new+(iy_end*nx), nx, MPI_REAL_TYPE, bottom, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE ));
         MPI_CALL( MPI_Sendrecv( a_new+(iy_end-1)*nx, nx, MPI_REAL_TYPE, bottom, 0, a_new,             nx, MPI_REAL_TYPE, top,    0, MPI_COMM_WORLD, MPI_STATUS_IGNORE ));
         POP_RANGE
+
+        //TODO: Waitall_on_stream()
 
 #if 0        
         if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
@@ -259,8 +271,11 @@ int main(int argc, char * argv[])
         std::swap(a_new,a);
         iter++;
     }
+    //TODO: Wait_stream_completion()
+
     double stop = MPI_Wtime();
     POP_RANGE
+
 
     CUDA_RT_CALL( cudaMemcpy( a_h+iy_start_global*nx, a+nx, std::min((ny-iy_start_global)*nx,chunk_size*nx)*sizeof(real), cudaMemcpyDeviceToHost ) );
 
