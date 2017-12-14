@@ -155,10 +155,19 @@ int main(int argc, char * argv[])
         
         MPI_CALL( MPI_Comm_free(&local_comm) );
     }
-
+    
+    int n_gpus;
+    CUDA_RT_CALL( cudaGetDeviceCount(&n_gpus) );
+    for (int gpu = 0; gpu < n_gpus; ++gpu) {
+        cudaDeviceProp prop;
+        CUDA_RT_CALL( cudaGetDeviceProperties(&prop, gpu) );
+        printf("[%d] GPU%d name=%s clockRate=%d memoryClockRate=%d multiProcessorCount=%d %s\n",
+               rank, gpu, prop.name, prop.clockRate, prop.memoryClockRate, prop.multiProcessorCount,
+               gpu == local_rank ? "<==" : "");
+    }
     CUDA_RT_CALL( cudaSetDevice( local_rank ) ); 
     CUDA_RT_CALL( cudaFree( 0 ) );
-    
+
     real* a_ref_h;
     CUDA_RT_CALL( cudaMallocHost( &a_ref_h, nx*ny*sizeof(real) ) );
     real* a_h;
@@ -392,7 +401,7 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
         CUDA_RT_CALL( cudaMemcpyAsync(
             a_new+iy_end*nx,
             a_new+iy_start*nx,
-            nx*sizeof(real), cudaMemcpyDeviceToDevice, compute_stream ) );
+            nx*sizeof(real), cudaMemcpyDeviceToDevice, push_bottom_stream ) );
         CUDA_RT_CALL( cudaEventRecord( push_bottom_done, push_bottom_stream ) );
         
         if ( (iter % nccheck) == 0 || (iter % 100) == 0 ) {
