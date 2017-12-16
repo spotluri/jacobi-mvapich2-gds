@@ -231,18 +231,14 @@ int main(int argc, char * argv[])
     PUSH_RANGE("Jacobi solve",0)
     while ( l2_norm > tol && iter < iter_max )
     {
-#if 0
         CUDA_RT_CALL( cudaMemsetAsync(l2_norm_d, 0 , sizeof(real), compute_stream ) );
-#endif
 
         launch_jacobi_kernel( a_new, a, l2_norm_d, iy_start, iy_end, nx, compute_stream );
         CUDA_RT_CALL( cudaEventRecord( compute_done, compute_stream ) );
      
-#if 0   
         if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
             CUDA_RT_CALL( cudaMemcpyAsync( l2_norm_h, l2_norm_d, sizeof(real), cudaMemcpyDeviceToHost, compute_stream ) );
         }
-#endif
 
         const int top = rank > 0 ? rank - 1 : (size-1);
         const int bottom = (rank+1)%size;
@@ -264,7 +260,6 @@ int main(int argc, char * argv[])
 
         //TODO: Waitall_on_stream()
 
-#if 0        
         if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
             CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
             MPI_CALL( MPI_Allreduce( l2_norm_h, &l2_norm, 1, MPI_REAL_TYPE, MPI_SUM, MPI_COMM_WORLD ) );
@@ -275,7 +270,6 @@ int main(int argc, char * argv[])
                 printf("%5d, %0.6f\n", iter, l2_norm);
             }
         }
-#endif     
    
         std::swap(a_new,a);
         iter++;
