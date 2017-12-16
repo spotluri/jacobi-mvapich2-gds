@@ -281,7 +281,7 @@ int main(int argc, char * argv[])
         iter++;
     }
     //TODO: Wait_stream_completion()
-
+    CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
     double stop = MPI_Wtime();
     POP_RANGE
 
