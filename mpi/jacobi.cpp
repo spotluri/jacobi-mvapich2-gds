@@ -414,6 +414,7 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
         std::swap(a_new,a);
         iter++;
     }
+    CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
     POP_RANGE
     double stop = MPI_Wtime();
     
