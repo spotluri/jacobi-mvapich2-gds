@@ -32,6 +32,8 @@
 #include <unistd.h>
 #include <mpi.h>
 
+#define CALC_KERNEL_TIME
+
 #define MPI_CALL( call ) \
 {   \
     int mpi_status = call; \
@@ -115,7 +117,7 @@ void launch_jacobi_kernel(
     const int nx,
     cudaStream_t stream);
 
-double single_gpu(const int nx, const int ny, const int iter_max, real* const a_ref_h, const int nccheck, const bool print);
+std::pair<double,float> single_gpu(const int nx, const int ny, const int iter_max, real* const a_ref_h, const int nccheck, const bool print);
 
 template<typename T>
 T get_argval(char ** begin, char ** end, const std::string& arg, const T default_val) {
@@ -185,7 +187,9 @@ int main(int argc, char * argv[])
     CUDA_RT_CALL( cudaMallocHost( &a_ref_h, nx*ny*sizeof(real) ) );
     real* a_h;
     CUDA_RT_CALL( cudaMallocHost( &a_h, nx*ny*sizeof(real) ) );
-    double runtime_serial = single_gpu(nx,ny,iter_max,a_ref_h,nccheck,!csv&&(0==rank));
+    double runtime_serial = 0;
+    float kernel_serial = 0;
+    std::tie(runtime_serial,kernel_serial) = single_gpu(nx,ny,iter_max,a_ref_h,nccheck,!csv&&(0==rank));
 
     real* a;
     CUDA_RT_CALL( cudaMalloc( &a, nx*(chunk_size+2)*sizeof(real) ) );
@@ -411,7 +415,7 @@ int main(int argc, char * argv[])
     return ( result_correct == 1 ) ? 0 : 1;
 }
 
-double single_gpu(const int nx, const int ny, const int iter_max, real* const a_ref_h, const int nccheck, const bool print)
+std::pair<double,float> single_gpu(const int nx, const int ny, const int iter_max, real* const a_ref_h, const int nccheck, const bool print)
 {
     real* a;
     real* a_new;
@@ -419,6 +423,9 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
     cudaStream_t compute_stream;
     cudaStream_t push_top_stream;
     cudaStream_t push_bottom_stream;
+#ifdef CALC_KERNEL_TIME
+    cudaEvent_t kernel_start;
+#endif
     cudaEvent_t compute_done;
     cudaEvent_t push_top_done;
     cudaEvent_t push_bottom_done;
@@ -442,7 +449,12 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
     CUDA_RT_CALL( cudaStreamCreate(&compute_stream) );
     CUDA_RT_CALL( cudaStreamCreate(&push_top_stream) );
     CUDA_RT_CALL( cudaStreamCreate(&push_bottom_stream) );
+#ifdef CALC_KERNEL_TIME
+    CUDA_RT_CALL( cudaEventCreateWithFlags ( &kernel_start, cudaEventDefault ) );
+    CUDA_RT_CALL( cudaEventCreateWithFlags ( &compute_done, cudaEventDefault ) );
+#else
     CUDA_RT_CALL( cudaEventCreateWithFlags ( &compute_done, cudaEventDisableTiming ) );
+#endif
     CUDA_RT_CALL( cudaEventCreateWithFlags ( &push_top_done, cudaEventDisableTiming ) );
     CUDA_RT_CALL( cudaEventCreateWithFlags ( &push_bottom_done, cudaEventDisableTiming ) );
     
@@ -455,6 +467,7 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
 
     int iter = 0;
     real l2_norm = 1.0;
+    float last_kernel_ms = 0.0f;
     
     double start = MPI_Wtime();
     PUSH_RANGE("Jacobi solve",0);
@@ -464,7 +477,9 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
         
         CUDA_RT_CALL( cudaStreamWaitEvent( compute_stream, push_top_done, 0 ) );
         CUDA_RT_CALL( cudaStreamWaitEvent( compute_stream, push_bottom_done, 0 ) );
-        
+#ifdef CALC_KERNEL_TIME        
+        CUDA_RT_CALL( cudaEventRecord( kernel_start, compute_stream ) );
+#endif
         launch_jacobi_kernel( a_new, a, l2_norm_d, iy_start, iy_end, nx, compute_stream );
         CUDA_RT_CALL( cudaEventRecord( compute_done, compute_stream ) );
         
@@ -490,6 +505,9 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
         
         if ( (iter % nccheck) == 0 || (iter % 100) == 0 ) {
             CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
+#ifdef CALC_KERNEL_TIME
+            CUDA_RT_CALL( cudaEventElapsedTime( &last_kernel_ms, kernel_start, compute_done ) );
+#endif
             l2_norm = *l2_norm_h;
             l2_norm = std::sqrt( l2_norm );
             if(print && (iter % 100) == 0) printf("%5d, %0.6f\n", iter, l2_norm);
@@ -498,9 +516,14 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
         std::swap(a_new,a);
         iter++;
     }
+    CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
     POP_RANGE();
-
     double stop = MPI_Wtime();
+#ifdef CALC_KERNEL_TIME
+    CUDA_RT_CALL( cudaEventElapsedTime( &last_kernel_ms, kernel_start, compute_done ) );
+#else
+    last_kernel_ms = .0f;
+#endif
     
     CUDA_RT_CALL( cudaMemcpy( a_ref_h, a, nx*ny*sizeof(real), cudaMemcpyDeviceToHost ) );
     
@@ -516,5 +539,5 @@ double single_gpu(const int nx, const int ny, const int iter_max, real* const a_
     
     CUDA_RT_CALL( cudaFree( a_new ) );
     CUDA_RT_CALL( cudaFree( a ) );
-    return (stop-start);
+    return std::make_pair(stop-start, last_kernel_ms/1000.0);
 }
