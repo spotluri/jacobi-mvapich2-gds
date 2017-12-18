@@ -98,6 +98,8 @@ constexpr real tol = 1.0e-8;
 
 const real PI  = 2.0 * std::asin(1.0);
 
+void launch_dummy_kernel(cudaStream_t stream);
+
 void launch_initialize_boundaries(
     real* __restrict__ const a_new,
     real* __restrict__ const a,
@@ -359,6 +361,10 @@ int main(int argc, char * argv[])
     //TODO: Wait_stream_completion()
     if (comm_use_gpu_comm())
         COMM_CHECK(comm_flush());
+
+    launch_dummy_kernel(compute_stream);
+    CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
+
     double stop = MPI_Wtime();
     POP_RANGE();
 

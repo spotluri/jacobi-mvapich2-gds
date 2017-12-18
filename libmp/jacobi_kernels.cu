@@ -105,3 +105,18 @@ void launch_jacobi_kernel(
     jacobi_kernel<<<dim_grid,dim_block,0,stream>>>( a_new, a, l2_norm, iy_start, iy_end, nx );
     CUDA_RT_CALL( cudaGetLastError() );
 }
+
+__global__ void dummy_kernel(uint *ptr)
+{
+    if (threadIdx.x > 1025) {
+        *ptr = threadIdx.x;
+    }
+}
+
+void launch_dummy_kernel(cudaStream_t stream)
+{
+    dim3 dim_block(32,1,1);
+    dim3 dim_grid(1,1,1);
+    dummy_kernel<<<dim_grid,dim_block,0,stream>>>(NULL);
+    CUDA_RT_CALL( cudaGetLastError() );
+}
