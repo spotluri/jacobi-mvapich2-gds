@@ -17,7 +17,7 @@ MPICXX_FLAGS = -I. -I$(PREFIX)/include -I$(CUDA_HOME)/include -std=c++11  -g -D_
 MPICXX_FLAGS += -DUSE_COMM 
 LD_FLAGS = -L$(PREFIX)/lib -lmpcomm -lmp -lgdsync -lgdrapi -L$(CUDA_HOME)/lib64 -lcudart -lnvToolsExt -lcuda
 
-all: Makefile jacobi sndrcv
+all: Makefile jacobi #sndrcv
 
 sndrcv: sndrcv.cpp
 	$(MPICXX) $(MPICXX_FLAGS) $^ -L$(CUDA_HOME)/lib64 -lcudart -L$(MPI_HOME)/lib64 -o $@
