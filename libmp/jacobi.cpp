@@ -117,6 +117,18 @@ void launch_jacobi_kernel(
     const int nx,
     cudaStream_t stream);
 
+void launch_comm_kernel(comm_dev_descs_t descs, cudaStream_t stream, int num_ranks);
+
+void launch_jacobi_comm_kernel(
+    real* __restrict__ const a_new,
+    const real* __restrict__ const a,
+    real* __restrict__ const l2_norm,
+    const int iy_start, const int iy_end,
+    const int nx,
+    cudaStream_t stream,
+    comm_dev_descs_t descs);
+
+
 std::pair<double,float> single_gpu(const int nx, const int ny, const int iter_max, real* const a_ref_h, const int nccheck, const bool print);
 
 template<typename T>
@@ -194,7 +206,19 @@ int main(int argc, char * argv[])
     real* a;
     CUDA_RT_CALL( cudaMalloc( &a, nx*(chunk_size+2)*sizeof(real) ) );
     real* a_new;
-    CUDA_RT_CALL( cudaMalloc( &a_new, nx*(chunk_size+2)*sizeof(real) ) );
+    int use_gpu_buffers=0;
+
+    if(use_gpu_buffers == 1)
+    {
+        CUDA_RT_CALL( cudaMalloc( &a_new, nx*(chunk_size+2)*sizeof(real) ) );
+        CUDA_RT_CALL( cudaMemset( a_new, 0, nx*(chunk_size+2)*sizeof(real) ) );        
+    }
+    else
+    {
+        CUDA_RT_CALL( cudaMallocHost( &a_new, nx*(chunk_size+2)*sizeof(real) ) );
+        memset( a_new, 0, nx*(chunk_size+2)*sizeof(real) );
+    }
+
     printf("[%d] allocated a/a_new size=%d reals\n", rank, nx*(chunk_size+2)); usleep(1);
     CUDA_RT_CALL( cudaMemset( a, 0, nx*(chunk_size+2)*sizeof(real) ) );
     CUDA_RT_CALL( cudaMemset( a_new, 0, nx*(chunk_size+2)*sizeof(real) ) );
@@ -202,7 +226,7 @@ int main(int argc, char * argv[])
     comm_reg_t a_reg = nullptr;
     comm_reg_t a_new_reg = nullptr;
     if (comm_use_comm()) {
-        printf("[%d] using libmp/comm in %s mode\n", rank, comm_use_async()?"async":"sync");
+        printf("[%d] using libmp/comm in %s mode\n", rank, comm_use_model_sa()?"async":"sync");
         COMM_CHECK(comm_init(MPI_COMM_WORLD, rank));
         printf("registering a=%p\n", a);
         COMM_CHECK(comm_register(a,     nx*(chunk_size+2), MPI_REAL_TYPE, &a_reg));
@@ -243,7 +267,28 @@ int main(int argc, char * argv[])
             comm_request_t ready_req[2];
             comm_request_t recv_req[2];
             comm_request_t send_req[2];
-            if (comm_use_async()) {
+            
+            // Async - KI Model
+            if (comm_use_model_ki()) {
+                COMM_CHECK(comm_irecv(a_new+(iy_end  *nx), nx, MPI_REAL_TYPE, &a_new_reg, bottom, &recv_req[0]));
+                COMM_CHECK(comm_send_ready_on_stream(bottom, &ready_req[0], compute_stream));
+                COMM_CHECK(comm_irecv(a_new, nx, MPI_REAL_TYPE, &a_new_reg, top, &recv_req[1]));
+                COMM_CHECK(comm_send_ready_on_stream(top, &ready_req[1], compute_stream));
+                
+                COMM_CHECK(comm_prepare_wait_ready(top));
+                COMM_CHECK(comm_prepare_isend(a_new+(iy_start*nx), nx, MPI_REAL_TYPE, &a_new_reg, top, &send_req[0]));
+                COMM_CHECK(comm_prepare_wait_ready(bottom));
+                COMM_CHECK(comm_prepare_isend(a_new+(iy_end-1)*nx, nx, MPI_REAL_TYPE, &a_new_reg, bottom, &send_req[1]));
+
+                COMM_CHECK(comm_prepare_wait_all(2, recv_req));
+                
+                comm_dev_descs_t descs = comm_prepared_requests();
+                launch_comm_kernel(descs, compute_stream, size);
+
+                COMM_CHECK(comm_wait_all_on_stream(2, send_req, compute_stream));
+                COMM_CHECK(comm_wait_all_on_stream(2, ready_req, compute_stream));
+            }
+            else if (comm_use_model_sa()) {
                 COMM_CHECK(comm_irecv(a_new+(iy_end  *nx), nx, MPI_REAL_TYPE, &a_new_reg, bottom, &recv_req[0]));
                 COMM_CHECK(comm_send_ready_on_stream(bottom, &ready_req[0], compute_stream));
                 COMM_CHECK(comm_irecv(a_new, nx, MPI_REAL_TYPE, &a_new_reg, top, &recv_req[1]));
@@ -258,6 +303,7 @@ int main(int argc, char * argv[])
 
                 COMM_CHECK(comm_wait_all_on_stream(2, recv_req, compute_stream));
                 COMM_CHECK(comm_wait_all_on_stream(2, send_req, compute_stream));
+                COMM_CHECK(comm_wait_all_on_stream(2, ready_req, compute_stream));
 
                 COMM_CHECK(comm_flush());
             } else {
@@ -308,11 +354,14 @@ int main(int argc, char * argv[])
         //printf("[%d] before kernel\n", rank);
         CUDA_RT_CALL( cudaMemsetAsync(l2_norm_d, 0 , sizeof(real), compute_stream ) );
 
-        launch_jacobi_kernel( a_new, a, l2_norm_d, iy_start, iy_end, nx, compute_stream );
-        CUDA_RT_CALL( cudaEventRecord( compute_done, compute_stream ) );
-     
-        if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
-            CUDA_RT_CALL( cudaMemcpyAsync( l2_norm_h, l2_norm_d, sizeof(real), cudaMemcpyDeviceToHost, compute_stream ) );
+        if(!comm_use_model_ki())
+        {
+            launch_jacobi_kernel( a_new, a, l2_norm_d, iy_start, iy_end, nx, compute_stream );
+            CUDA_RT_CALL( cudaEventRecord( compute_done, compute_stream ) );
+         
+            if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
+                CUDA_RT_CALL( cudaMemcpyAsync( l2_norm_h, l2_norm_d, sizeof(real), cudaMemcpyDeviceToHost, compute_stream ) );
+            }
         }
 
         const int top = rank > 0 ? rank - 1 : (size-1);
@@ -328,7 +377,30 @@ int main(int argc, char * argv[])
             comm_request_t ready_req[2];
             comm_request_t recv_req[2];
             comm_request_t send_req[2];
-            if (comm_use_async()) {
+            if (comm_use_model_ki()) {
+                COMM_CHECK(comm_irecv(a_new+(iy_end  *nx), nx, MPI_REAL_TYPE, &a_new_reg, bottom, &recv_req[0]));
+                COMM_CHECK(comm_send_ready_on_stream(bottom, &ready_req[0], compute_stream));
+                COMM_CHECK(comm_irecv(a_new, nx, MPI_REAL_TYPE, &a_new_reg, top, &recv_req[1]));
+                COMM_CHECK(comm_send_ready_on_stream(top, &ready_req[1], compute_stream));
+                
+                COMM_CHECK(comm_prepare_wait_ready(top));
+                COMM_CHECK(comm_prepare_isend(a_new+(iy_start*nx), nx, MPI_REAL_TYPE, &a_new_reg, top, &send_req[0]));
+                COMM_CHECK(comm_prepare_wait_ready(bottom));
+                COMM_CHECK(comm_prepare_isend(a_new+(iy_end-1)*nx, nx, MPI_REAL_TYPE, &a_new_reg, bottom, &send_req[1]));
+
+                COMM_CHECK(comm_prepare_wait_all(2, recv_req));
+                
+                // ----------- Compute and Communicate
+                comm_dev_descs_t descs = comm_prepared_requests();
+                launch_jacobi_comm_kernel( a_new, a, l2_norm_d, iy_start, iy_end, nx, compute_stream, descs, ordered_sends );
+                if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
+                    CUDA_RT_CALL( cudaMemcpyAsync( l2_norm_h, l2_norm_d, sizeof(real), cudaMemcpyDeviceToHost, compute_stream ) );
+                }
+                // -----------------------------------
+                COMM_CHECK(comm_wait_all_on_stream(2, send_req, compute_stream));
+                COMM_CHECK(comm_wait_all_on_stream(2, ready_req, compute_stream));
+            }
+            else if (comm_use_model_sa()) {
                 COMM_CHECK(comm_irecv(a_new+(iy_end  *nx), nx, MPI_REAL_TYPE, &a_new_reg, bottom, &recv_req[0]));
                 COMM_CHECK(comm_send_ready_on_stream(bottom, &ready_req[0], compute_stream));
                 COMM_CHECK(comm_irecv(a_new, nx, MPI_REAL_TYPE, &a_new_reg, top, &recv_req[1]));
@@ -343,6 +415,7 @@ int main(int argc, char * argv[])
 
                 COMM_CHECK(comm_wait_all_on_stream(2, recv_req, compute_stream));
                 COMM_CHECK(comm_wait_all_on_stream(2, send_req, compute_stream));
+                COMM_CHECK(comm_wait_all_on_stream(2, ready_req, compute_stream));
                 // moving flush out of loop seems to be detrimental
                 //COMM_CHECK(comm_flush());
             } else {
@@ -373,7 +446,7 @@ int main(int argc, char * argv[])
         POP_RANGE();
 
         if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
-            if (comm_use_comm() && comm_use_async())
+            if (comm_use_comm() && comm_use_model_sa())
                 COMM_CHECK(comm_flush());
             CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
             MPI_CALL( MPI_Allreduce( l2_norm_h, &l2_norm, 1, MPI_REAL_TYPE, MPI_SUM, MPI_COMM_WORLD ) );
@@ -389,7 +462,7 @@ int main(int argc, char * argv[])
         iter++;
     }
 
-    if (comm_use_comm() && comm_use_async())
+    if (comm_use_comm() && comm_use_model_sa())
         COMM_CHECK(comm_flush());
     CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
 
@@ -428,7 +501,11 @@ int main(int argc, char * argv[])
     CUDA_RT_CALL( cudaFreeHost( l2_norm_h ) );
     CUDA_RT_CALL( cudaFree( l2_norm_d ) );
     
-    CUDA_RT_CALL( cudaFree( a_new ) );
+    if (use_gpu_buffers == 1)
+    { CUDA_RT_CALL( cudaFree( a_new ) ); }
+    else
+    { CUDA_RT_CALL( cudaFreeHost( a_new ) ); }
+
     CUDA_RT_CALL( cudaFree( a ) );
     
     CUDA_RT_CALL( cudaFreeHost( a_h ) );

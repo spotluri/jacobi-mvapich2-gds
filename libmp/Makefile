@@ -12,12 +12,10 @@ GENCODE_SM61	:= -gencode arch=compute_61,code=sm_61
 GENCODE_SM70	:= -gencode arch=compute_70,code=sm_70
 GENCODE_FLAGS	:= $(GENCODE_SM35) $(GENCODE_SM60) $(GENCODE_SM70)
 NVCC_FLAGS = -lineinfo $(GENCODE_FLAGS) -std=c++11
-MPICXX_FLAGS = -I. -I../../libmp/comm_benchmarks -I$(CUDA_HOME)/include -std=c++11 -I$(PREFIX)/include -g -D_ENABLE_CUDA_=1
+MPICXX_FLAGS = -I. -I$(PREFIX)/include -I$(CUDA_HOME)/include -std=c++11  -g -D_ENABLE_CUDA_=1
 #MPICXX_FLAGS += -DUSE_NVTX 
 MPICXX_FLAGS += -DUSE_COMM 
-LD_FLAGS = -L$(PREFIX)/lib -lmp -lgdsync -lgdrapi -L$(CUDA_HOME)/lib64 -lcudart -lnvToolsExt -lcuda
-
-vpath %.cc ../../libmp/comm_benchmarks
+LD_FLAGS = -L$(PREFIX)/lib -lmpcomm -lmp -lgdsync -lgdrapi -L$(CUDA_HOME)/lib64 -lcudart -lnvToolsExt -lcuda
 
 all: Makefile jacobi sndrcv
 
@@ -27,16 +25,11 @@ sndrcv: sndrcv.cpp
 osu_latency: osu_latency.o osu_pt2pt.o
 	$(MPICXX) $(MPICXX_FLAGS) $^ -L$(CUDA_HOME)/lib64 -lcudart -L$(MPI_HOME)/lib64 -o $@
 
-
-
-jacobi: jacobi.cpp jacobi_kernels.o comm.o
+jacobi: jacobi.cpp jacobi_kernels.o
 	$(MPICXX) $(MPICXX_FLAGS) $^ $(LD_FLAGS) -o $@
 
 jacobi_kernels.o: jacobi_kernels.cu
 	$(NVCC) $(NVCC_FLAGS) jacobi_kernels.cu -c -o $@
-
-comm.o: comm.cc
-	$(MPICXX) $(MPICXX_FLAGS) $^ -c -o $@
 
 %.o: %.c
 	$(MPICXX) $(MPICXX_FLAGS) $^ -c -o $@

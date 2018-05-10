@@ -120,3 +120,183 @@ void launch_dummy_kernel(cudaStream_t stream)
     dummy_kernel<<<dim_grid,dim_block,0,stream>>>(NULL);
     CUDA_RT_CALL( cudaGetLastError() );
 }
+
+/*
+ ******************************************************
+ * Async KI Model - communication kernel
+ ******************************************************
+*/
+
+#include <comm.h>
+
+// ==================== Init ====================
+#define TOT_SCHEDS 128
+const int max_scheds = TOT_SCHEDS;
+const int max_types = 3;
+static int n_scheds = TOT_SCHEDS;
+
+typedef struct sched_info {
+//  mp::mlx5::gdsync::sem32_t sema;
+	unsigned int block;
+	unsigned int done[max_types];
+} sched_info_t;
+
+__device__ sched_info_t scheds[max_scheds];
+
+__global__ void scheds_init()
+{
+	int j = threadIdx.x;
+	assert(gridDim.x == 1);
+	assert(blockDim.x >= max_scheds);
+	if (j < max_scheds) {
+ //   scheds[j].sema.sem = 0;
+//    scheds[j].sema.value = 1;
+		scheds[j].block = 0;
+		for (int i = 0; i < max_types; ++i)
+			scheds[j].done[i] = 0;
+	}
+}
+
+__device__ static inline unsigned int elect_block(sched_info &sched)
+{
+	unsigned int ret;
+	const int n_grids = gridDim.x * gridDim.y * gridDim.z;
+	__shared__ unsigned int block;
+	if (0 == threadIdx.x && 0 == threadIdx.y && 0 == threadIdx.z) {
+		// 1st guy gets 0
+		block = atomicInc(&sched.block, n_grids);
+	}
+	__syncthreads();
+	ret = block;
+	return ret;
+}
+
+// ==================== Comm Kernel ====================
+__global__ void comm_kernel(int sched_id, comm_dev_descs_t descs)
+{
+	assert(sched_id >= 0 && sched_id < max_scheds);
+	sched_info_t &sched = scheds[sched_id];
+	int block = elect_block(sched);
+
+	//First one receive
+	if(block == 0)
+	{
+		assert(blockDim.x >= descs->n_wait);
+		if (threadIdx.x < descs->n_wait) {
+			//printf("blockDim.x: %d blockIdx.x: %d, threadIdx.x %d waiting\n", blockDim.x, blockIdx.x, threadIdx.x);
+			mp::device::mlx5::wait(descs->wait[threadIdx.x]);
+			// write MP trk flag
+			// note: no mem barrier here!!!
+			mp::device::mlx5::signal(descs->wait[threadIdx.x]);
+		}
+
+		__syncthreads();
+	}
+
+	//Second one send
+	if(block == 1)
+	{
+		//n_ready
+		if (threadIdx.x < descs->n_tx) {
+			// wait for ready
+			gdsync::device::wait_geq(descs->ready[threadIdx.x]);
+			// signal NIC
+			mp::device::mlx5::send(descs->tx[threadIdx.x]);				
+		}
+		__syncthreads();
+	}
+}
+
+
+void launch_comm_kernel(comm_dev_descs_t descs, cudaStream_t stream, int num_ranks)
+{
+	dim3 dim_block( num_ranks,1,1);
+	dim3 dim_grid(2,1,1);
+	//assert( descs->n_ready > 0 );
+
+	if (n_scheds >= max_scheds) {
+		scheds_init<<<1, max_scheds, 0, stream>>>();
+		n_scheds = 0;
+	}
+
+	comm_kernel<<<dim_grid,dim_block,0,stream>>>(n_scheds++, descs);
+	CUDA_RT_CALL( cudaGetLastError() );
+}
+
+__global__ void jacobi_kernel_comm(
+	real* __restrict__ const a_new,
+	const real* __restrict__ const a,
+	real* __restrict__ const l2_norm,
+	const int iy_start, const int iy_end,
+	const int nx,
+	comm_dev_descs_t descs,
+	int sched_id)
+{
+	for (int iy = blockIdx.y * blockDim.y + threadIdx.y + iy_start; 
+		iy < iy_end; 
+		iy += blockDim.y * gridDim.y) {
+		for (int ix = blockIdx.x * blockDim.x + threadIdx.x + 1; 
+			ix < (nx-1); 
+			ix += blockDim.x * gridDim.x) {
+			const real new_val = 0.25 * ( a[ iy * nx + ix + 1 ] + a[ iy * nx + ix - 1 ]
+				+ a[ (iy+1) * nx + ix ] + a[ (iy-1) * nx + ix ] );
+			a_new[ iy * nx + ix ] = new_val;
+			real residue = new_val - a[ iy * nx + ix ];
+			atomicAdd( l2_norm, residue*residue );
+	}}
+
+	assert(sched_id >= 0 && sched_id < max_scheds);
+	sched_info_t &sched = scheds[sched_id];
+	int gridSize = gridDim.x * gridDim.y * gridDim.z;
+	int block = elect_block(sched);
+	
+	//First one receive
+	if(block == 0)
+	{
+		if (threadIdx.x == 0 &&  threadIdx.y < descs->n_wait)
+		{
+			mp::device::mlx5::wait(descs->wait[threadIdx.y]);
+			// write MP trk flag
+			// note: no mem barrier here!!!
+			mp::device::mlx5::signal(descs->wait[threadIdx.y]);
+		}
+		__syncthreads();
+	}
+
+	//Last one sends
+	if(block == (gridSize-1))
+	{
+		if (threadIdx.x == 0 &&  threadIdx.y < descs->n_tx)
+		{
+			// wait for ready
+			gdsync::device::wait_geq(descs->ready[threadIdx.y]);
+			// signal NIC
+			mp::device::mlx5::send(descs->tx[threadIdx.y]);				
+		}
+
+		__syncthreads();
+	}
+}
+
+void launch_jacobi_comm_kernel(
+	real* __restrict__ const a_new,
+	const real* __restrict__ const a,
+	real* __restrict__ const l2_norm,
+	const int iy_start, const int iy_end,
+	const int nx,
+	cudaStream_t stream,
+	comm_dev_descs_t descs)
+{
+	if (n_scheds >= max_scheds) {
+		scheds_init<<<1, max_scheds, 0, stream>>>();
+		n_scheds = 0;
+	}
+
+	dim3 dim_block(32,4,1);
+	dim3 dim_grid( nx/dim_block.x+1, (iy_end-iy_start)/dim_block.y+1, 1 );
+	
+	jacobi_kernel_comm<<<dim_grid,dim_block,0,stream>>>( a_new, a, l2_norm, 
+							iy_start, iy_end, nx,
+							descs, n_scheds++);
+	CUDA_RT_CALL( cudaGetLastError() );
+}
