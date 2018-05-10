@@ -227,11 +227,11 @@ int main(int argc, char * argv[])
     comm_reg_t a_new_reg = nullptr;
     if (comm_use_comm()) {
         printf("[%d] using libmp/comm in %s mode\n", rank, comm_use_model_sa()?"async":"sync");
-        COMM_CHECK(comm_init(MPI_COMM_WORLD, rank));
+        COMM_CHECK(comm_init(MPI_COMM_WORLD, selected_gpu));
         printf("registering a=%p\n", a);
-        COMM_CHECK(comm_register(a,     nx*(chunk_size+2), MPI_REAL_TYPE, &a_reg));
+        COMM_CHECK(comm_register(a,     nx*(chunk_size+2)*sizeof(real), &a_reg));
         printf("registering a_new=%p\n", a_new);
-        COMM_CHECK(comm_register(a_new, nx*(chunk_size+2), MPI_REAL_TYPE, &a_new_reg));
+        COMM_CHECK(comm_register(a_new, nx*(chunk_size+2)*sizeof(real), &a_new_reg));
     } else {
         printf("[%d] using MPI\n", rank);
     }
@@ -392,7 +392,7 @@ int main(int argc, char * argv[])
                 
                 // ----------- Compute and Communicate
                 comm_dev_descs_t descs = comm_prepared_requests();
-                launch_jacobi_comm_kernel( a_new, a, l2_norm_d, iy_start, iy_end, nx, compute_stream, descs, ordered_sends );
+                launch_jacobi_comm_kernel( a_new, a, l2_norm_d, iy_start, iy_end, nx, compute_stream, descs);
                 if ( (iter % nccheck) == 0 || (!csv && (iter % 100) == 0) ) {
                     CUDA_RT_CALL( cudaMemcpyAsync( l2_norm_h, l2_norm_d, sizeof(real), cudaMemcpyDeviceToHost, compute_stream ) );
                 }
