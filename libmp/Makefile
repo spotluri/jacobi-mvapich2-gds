@@ -11,7 +11,7 @@ GENCODE_SM60	:= -gencode arch=compute_60,code=sm_60 -gencode arch=compute_60,cod
 GENCODE_SM61	:= -gencode arch=compute_61,code=sm_61
 GENCODE_SM70	:= -gencode arch=compute_70,code=sm_70
 GENCODE_FLAGS	:= $(GENCODE_SM35) $(GENCODE_SM60) $(GENCODE_SM70)
-NVCC_FLAGS = -lineinfo $(GENCODE_FLAGS) -std=c++11
+NVCC_FLAGS = -lineinfo $(GENCODE_FLAGS) -std=c++11 -I$(PREFIX)/include
 MPICXX_FLAGS = -I. -I$(PREFIX)/include -I$(CUDA_HOME)/include -std=c++11  -g -D_ENABLE_CUDA_=1
 #MPICXX_FLAGS += -DUSE_NVTX 
 MPICXX_FLAGS += -DUSE_COMM 
