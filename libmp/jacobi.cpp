@@ -376,6 +376,7 @@ int main(int argc, char * argv[])
 
         if (comm_use_comm()) {
             comm_request_t ready_req[2];
+            comm_request_t sr_req[4];
             comm_request_t recv_req[2];
             comm_request_t send_req[2];
             if (comm_use_model_ki()) {
@@ -402,21 +403,21 @@ int main(int argc, char * argv[])
                 COMM_CHECK(comm_wait_all_on_stream(2, ready_req, compute_stream));
             }
             else if (comm_use_model_sa()) {
-                COMM_CHECK(comm_irecv(a_new+(iy_end  *nx), nx, MPI_REAL_TYPE, &a_new_reg, bottom, &recv_req[0]));
+                //COMM_CHECK(comm_irecv(a_new+(iy_end  *nx), nx, MPI_REAL_TYPE, &a_new_reg, bottom, &recv_req[0]));
+                COMM_CHECK(comm_irecv(a_new+(iy_end  *nx), nx, MPI_REAL_TYPE, &a_new_reg, bottom, &sr_req[0]));
+
                 COMM_CHECK(comm_send_ready_on_stream(bottom, &ready_req[0], compute_stream));
-                COMM_CHECK(comm_irecv(a_new, nx, MPI_REAL_TYPE, &a_new_reg, top, &recv_req[1]));
+                COMM_CHECK(comm_irecv(a_new, nx, MPI_REAL_TYPE, &a_new_reg, top, &sr_req[1]));
                 COMM_CHECK(comm_send_ready_on_stream(top, &ready_req[1], compute_stream));
 
                 COMM_CHECK(comm_wait_ready_on_stream(top, compute_stream));
-                COMM_CHECK(comm_isend_on_stream(a_new+(iy_start*nx), nx, MPI_REAL_TYPE, &a_new_reg, top,    &send_req[0], compute_stream));
+                COMM_CHECK(comm_isend_on_stream(a_new+(iy_start*nx), nx, MPI_REAL_TYPE, &a_new_reg, top,    &sr_req[2], compute_stream));
 
                 COMM_CHECK(comm_wait_ready_on_stream(bottom, compute_stream));
-                COMM_CHECK(comm_isend_on_stream(a_new+(iy_end-1)*nx, nx, MPI_REAL_TYPE, &a_new_reg, bottom, &send_req[1], compute_stream));
+                COMM_CHECK(comm_isend_on_stream(a_new+(iy_end-1)*nx, nx, MPI_REAL_TYPE, &a_new_reg, bottom, &sr_req[3], compute_stream));
 
-
-                COMM_CHECK(comm_wait_all_on_stream(2, recv_req, compute_stream));
-                COMM_CHECK(comm_wait_all_on_stream(2, send_req, compute_stream));
-                COMM_CHECK(comm_wait_all_on_stream(2, ready_req, compute_stream));
+                COMM_CHECK(comm_wait_all_on_stream(4, sr_req, compute_stream));
+                //COMM_CHECK(comm_wait_all_on_stream(2, ready_req, compute_stream));
                 // moving flush out of loop seems to be detrimental
                 //COMM_CHECK(comm_flush());
             } else {
@@ -439,9 +440,15 @@ int main(int argc, char * argv[])
             std::swap(a_new_reg,a_reg);
         } else {
             CUDA_RT_CALL( cudaEventSynchronize( compute_done ) );
-            //CUDA_RT_CALL( cudaStreamSynchronize( compute_stream ) );
-            MPI_CALL( MPI_Sendrecv( a_new+iy_start*nx,   nx, MPI_REAL_TYPE, top   , 0, a_new+(iy_end*nx), nx, MPI_REAL_TYPE, bottom, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE ));
-            MPI_CALL( MPI_Sendrecv( a_new+(iy_end-1)*nx, nx, MPI_REAL_TYPE, bottom, 0, a_new,             nx, MPI_REAL_TYPE, top,    0, MPI_COMM_WORLD, MPI_STATUS_IGNORE ));
+            if (use_mpi_async) {
+                MPI_CALL( MPI_Irecv(a_new+(iy_end*nx), nx, MPI_REAL_TYPE, bottom, 0, MPI_COMM_WORLD, &recv_req[0]) );
+                MPI_CALL( MPI_Irecv(a_new,             nx, MPI_REAL_TYPE, top,    1, MPI_COMM_WORLD, &recv_req[1]) );
+                MPI_CALL( MPI_Isend(a_new+iy_start*nx, nx, MPI_REAL_TYPE, top,    9, MPI_COMM_WORLD, &send_req[0]) );
+                MPI_CALL( MPI_Isend(a_new+(iy_end-1)*nx,nx, MPI_REAL_TYPE, bottom,
+            } else {
+                MPI_CALL( MPI_Sendrecv( a_new+iy_start*nx,   nx, MPI_REAL_TYPE, top   , 0, a_new+(iy_end*nx), nx, MPI_REAL_TYPE, bottom, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE ));
+                MPI_CALL( MPI_Sendrecv( a_new+(iy_end-1)*nx, nx, MPI_REAL_TYPE, bottom, 0, a_new,             nx, MPI_REAL_TYPE, top,    0, MPI_COMM_WORLD, MPI_STATUS_IGNORE ));
+            }
         }
 
         POP_RANGE();
